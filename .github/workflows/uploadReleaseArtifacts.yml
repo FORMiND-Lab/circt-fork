@@ -1,0 +1,107 @@
+name: Upload Release Artifacts
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  publish-sources:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Upload assets to release.
+    steps:
+      # Clone the repository with CIRCT submodule and its nested submodules
+      - name: Get repository and CIRCT submodule
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+          submodules: "recursive"
+
+      # Package up sources for distribution, as the default source bundles from GitHub don't include LLVM.
+      - name: Create Source Archive
+        run: |
+          touch circt-full-sources.tar.gz
+          tar \
+            --exclude-vcs \
+            --exclude=circt-full-sources.tar.gz \
+            -czf \
+            circt-full-sources.tar.gz .
+          shasum -a 256 circt-full-sources.tar.gz | cut -d ' ' -f1 > circt-full-sources.tar.gz.sha256
+
+      - name: Upload Source Archive
+        uses: AButler/upload-release-assets@v3.0
+        with:
+          # The * will grab the .sha256 as well
+          files: circt-full-sources.tar.gz*
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          release-tag: ${{ github.ref_name }} # Upload to release tag when manually run.
+
+  # This job sets up the build matrix.
+  choose-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      # Clone repository - no need for submodules here, just need the script
+      - name: Get repository and CIRCT submodule
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          submodules: "false"
+      - name: Get Configuration
+        id: get-config
+        run: |
+          config=$(.github/bin/uploadReleaseArtifacts.sh -e release)
+
+          echo "Build Matrix:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$config" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+          static=$(echo "$config" | jq -c '.static')
+          native=$(echo "$config" | jq -c '.native')
+
+          echo "static=$static" >> $GITHUB_OUTPUT
+          echo "native=$native" >> $GITHUB_OUTPUT
+    outputs:
+      static: ${{ steps.get-config.outputs.static }}
+      native: ${{ steps.get-config.outputs.native }}
+
+  publish-static:
+    needs:
+      - choose-matrix
+    if: ${{ needs.choose-matrix.outputs.static != '[]' }}
+    strategy:
+      matrix:
+        generated: ${{ fromJSON(needs.choose-matrix.outputs.static) }}
+    permissions:
+      contents: write # Upload assets to release.
+    uses: ./.github/workflows/unifiedBuildTestAndInstallStatic.yml
+    with:
+      cmake_build_type: ${{ matrix.generated.cmake_build_type }}
+      llvm_enable_assertions: ${{ matrix.generated.llvm_enable_assertions }}
+      llvm_force_enable_stats: ${{ matrix.generated.llvm_force_enable_stats }}
+      run_tests: ${{ matrix.generated.run_tests }}
+      install_target: ${{ matrix.generated.install_target }}
+      package_name_prefix: ${{ matrix.generated.package_name_prefix }}
+
+  publish-native:
+    needs:
+      - choose-matrix
+    if: ${{ needs.choose-matrix.outputs.native != '[]' }}
+    strategy:
+      matrix:
+        generated: ${{ fromJSON(needs.choose-matrix.outputs.native) }}
+    permissions:
+      contents: write # Upload assets to release.
+    uses: ./.github/workflows/unifiedBuildTestAndInstall.yml
+    with:
+      runner: ${{ matrix.generated.runner }}
+      cmake_build_type: ${{ matrix.generated.cmake_build_type }}
+      build_shared_libs: ${{ matrix.generated.build_shared_libs }}
+      llvm_enable_assertions: ${{ matrix.generated.llvm_enable_assertions }}
+      llvm_force_enable_stats: ${{ matrix.generated.llvm_force_enable_stats }}
+      run_tests: ${{ matrix.generated.run_tests }}
+      install_target: ${{ matrix.generated.install_target }}
+      package_name_prefix: ${{ matrix.generated.package_name_prefix }}
+      cmake_c_compiler: ${{ matrix.generated.cmake_c_compiler }}
+      cmake_cxx_compiler: ${{ matrix.generated.cmake_cxx_compiler }} 
